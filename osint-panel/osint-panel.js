@@ -58,6 +58,7 @@ if (!document.getElementById("osint-panel")) {
   // This keeps crawl info, output window handles, and collected results.
   var state = {
     domain: location.hostname,
+    baseDomain: location.hostname.replace(/^www\./i, "").toLowerCase(),
     encodedURL: encodeURIComponent(location.href),
     startUrl: location.href.replace(/\/+$/, "").toLowerCase(),
     maxDepth: 2,
@@ -70,6 +71,7 @@ if (!document.getElementById("osint-panel")) {
     outputDoc: null,
     lastStatsHTML: "",
     phoneLibPromise: null,
+    stopRequested: false,
     results: {
       email: new Map(),
       phone: new Map(),
@@ -83,7 +85,7 @@ if (!document.getElementById("osint-panel")) {
   var PATTERNS = {
     email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g,
     social: /https?:\/\/[^\s"'<>]*(facebook|instagram|linkedin|twitter|tiktok|youtube)[^\s"'<>]*/gi,
-    external: new RegExp("https?:\\/\\/(?!" + state.domain.replace(/\./g, "\\.") + ")[^\\s\"'<>]+", "gi")
+    external: new RegExp("https?:\\/\\/(?!(?:[^\\/]+\\.)?" + state.baseDomain.replace(/\./g, "\\.") + "(?:[\\/:?#]|$))[^\\s\"'<>]+", "gi")
   };
 
   // Broad phone candidate matcher.
@@ -351,6 +353,25 @@ if (!document.getElementById("osint-panel")) {
     };
   }
 
+  function stopOSINTScraper() {
+    state.stopRequested = true;
+    state.status = "Stopped";
+    renderStats();
+
+    if (state.outputDoc) {
+      var btn = state.outputDoc.getElementById("osint-stop-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Stopped";
+      }
+
+      var loader = state.outputDoc.getElementById("loader");
+      if (loader) {
+        loader.style.display = "none";
+      }
+    }
+  }
+
   // ================= OUTPUT UI =================
   /**
    * Opens the separate output/results window and renders its full shell.
@@ -391,6 +412,8 @@ if (!document.getElementById("osint-panel")) {
       + ".header-text{display:flex;flex-direction:column;gap:3px;min-width:0;}"
       + ".header-title{font-size:15px;font-weight:700;color:#eef3f7;letter-spacing:0.08em;text-transform:uppercase;}"
       + ".header-sub{font-size:11px;color:var(--muted);word-break:break-all;}"
+      + ".header-actions{margin-left:auto;}"
+      + ".stop-btn{display:none;padding:8px 12px;border:1px solid #5a2323;background:#1a0d0d;color:#ffb3b3;border-radius:4px;font-size:12px;cursor:pointer;}"
       + ".stats{display:flex;gap:10px;flex-wrap:wrap;padding:12px 22px;border-bottom:1px solid var(--line);background:#080b0f;}"
       + ".stat{padding:7px 10px;border:1px solid var(--line2);background:var(--panel);border-radius:4px;font-size:11px;color:#cfd7df;text-transform:uppercase;}"
       + "#loader{border:3px solid #1a2430;border-top:3px solid #7ea5d4;border-radius:50%;width:28px;height:28px;animation:spin 0.9s linear infinite;margin:18px auto 0 auto;}"
@@ -432,6 +455,9 @@ if (!document.getElementById("osint-panel")) {
       +     "<div class='header-title'>" + CONFIG.outputTitle + " / OUTPUT</div>"
       +     "<div class='header-sub'>" + state.domain + "</div>"
       +   "</div>"
+      +   "<div class='header-actions'>"
+      +     "<button id='osint-stop-btn' class='stop-btn'>Stop</button>"
+      +   "</div>"
       + "</div>"
 
       + "<div class='stats' id='stats'></div>"
@@ -439,12 +465,14 @@ if (!document.getElementById("osint-panel")) {
 
       + "<div class='grid'>"
       +   buildCard("Emails", "emailBody")
-      +   buildCard("Phones", "phoneBody")
+      +   buildCard("Possible phone numbers", "phoneBody")
       +   buildCard("External Links", "externalBody")
       +   buildCard("Social Profiles", "socialBody")
       + "</div>";
 
     setupLogo(state.outputDoc.getElementById("osint-logo-output"));
+
+    state.outputDoc.getElementById("osint-stop-btn").onclick = stopOSINTScraper;
   }
 
   /**
@@ -493,6 +521,16 @@ if (!document.getElementById("osint-panel")) {
 
     if (!doc) return;
 
+    // Hide or disable the Stop button based on the current status.
+    var stopBtn = doc.getElementById("osint-stop-btn");
+      var canStop = state.status === "Discovering" || state.status === "Scanning";
+
+      if (stopBtn) {
+        stopBtn.style.display = canStop ? "inline-block" : "none";
+        stopBtn.disabled = !canStop;
+        stopBtn.textContent = state.status === "Stopped" ? "Stopped" : "Stop";
+      }
+
     if (state.status === "Done") {
       speed = "0.0";
     } else {
@@ -516,193 +554,126 @@ if (!document.getElementById("osint-panel")) {
     }
   }
 
-  // ================= PHONE LIB =================
-  /**
-   * Loads libphonenumber exactly once and returns a promise for it.
-   *
-   * Why this exists:
-   * - phone numbers are messy across countries
-   * - regex alone is too noisy
-   * - libphonenumber gives validation and normalized output
-   *
-   * The promise is cached in state.phoneLibPromise so multiple calls do not
-   * re-insert the script tag.
-   */
-  function getPhoneLib() {
-    if (window.libphonenumber && window.libphonenumber.parsePhoneNumberFromString) {
-      return Promise.resolve(window.libphonenumber);
-    }
-
-    if (state.phoneLibPromise) {
-      return state.phoneLibPromise;
-    }
-
-    state.phoneLibPromise = new Promise(function (resolve, reject) {
-      var existing = document.querySelector('script[data-osint-phone-lib="1"]');
-      if (existing) {
-        existing.addEventListener("load", function () {
-          if (window.libphonenumber && window.libphonenumber.parsePhoneNumberFromString) {
-            resolve(window.libphonenumber);
-          } else {
-            reject(new Error("Phone library loaded but unavailable."));
-          }
-        });
-        existing.addEventListener("error", function () {
-          reject(new Error("Phone library failed to load."));
-        });
-        return;
-      }
-
-      var script = document.createElement("script");
-      script.src = CONFIG.phoneLibUrl;
-      script.async = true;
-      script.setAttribute("data-osint-phone-lib", "1");
-
-      script.onload = function () {
-        if (window.libphonenumber && window.libphonenumber.parsePhoneNumberFromString) {
-          resolve(window.libphonenumber);
-        } else {
-          reject(new Error("Phone library loaded but unavailable."));
-        }
-      };
-
-      script.onerror = function () {
-        reject(new Error("Phone library failed to load."));
-      };
-
-      document.head.appendChild(script);
-    });
-
-    return state.phoneLibPromise;
-  }
-
   // ================= PHONE HELPERS =================
-  /**
-   * Lightweight heuristic filter to reject obviously wrong phone candidates
-   * before handing them to libphonenumber.
-   *
-   * This removes common false positives such as:
-   * - dates
-   * - decimals
-   * - repeated digits
-   * - strings that are too short/long
-   *
-   * Special case:
-   * Dutch service numbers like 0800-xxxx and 0900-xxxx are explicitly allowed.
-   */
-  function looksLikeObviousNonPhone(raw) {
-    var trimmed = raw.trim();
-    var digits = trimmed.replace(/\D/g, "");
 
-    if (/^0(?:800|900)\d{4,7}$/.test(digits)) {
-      return false;
-    }
+// Broad candidate matcher for possible phone numbers.
+// OSINT-style: we prefer recall over strict validation.
+var PHONE_CANDIDATE_RE = /(?:\+|00)?\d(?:[\d\s().\/-]{5,}\d)/g;
 
-    if (digits.length < 8 || digits.length > 15) return true;
-    if (/^(\d)\1+$/.test(digits)) return true;
-    if (/^0+$/.test(digits)) return true;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return true;
-    if (/^\d{1,2}[:/.-]\d{1,2}([:/.-]\d{2,4})?$/.test(trimmed)) return true;
-    if (/^\d+\.\d+$/.test(trimmed)) return true;
+function chooseBestPhoneDisplay(currentDisplay, newDisplay) {
+  if (!currentDisplay) return newDisplay;
+  if (newDisplay.charAt(0) === "+" && currentDisplay.charAt(0) !== "+") return newDisplay;
+  if (newDisplay.length > currentDisplay.length) return newDisplay;
+  return currentDisplay;
+}
 
-    return false;
+function looksTooFakeAsPhone(raw) {
+  var digits = (raw || "").replace(/\D/g, "");
+
+  if (digits.length < 7 || digits.length > 15) return true;
+  if (/^(\d)\1+$/.test(digits)) return true;
+  if (/^0+$/.test(digits)) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test((raw || "").trim())) return true;
+  if (/^\d+\.\d+$/.test((raw || "").trim())) return true;
+
+  return false;
+}
+
+function normalizeLoosePhone(raw) {
+  var value = (raw || "").trim();
+  var normalized;
+
+  if (!value) return null;
+
+  normalized = value.replace(/[^\d+]/g, "");
+
+  if (normalized.indexOf("00") === 0) {
+    normalized = "+" + normalized.slice(2);
   }
 
-  /**
-   * Chooses the nicer human-facing phone display between two variants.
-   *
-   * Preference order:
-   * 1. international format with leading +
-   * 2. longer / more explicit representation
-   *
-   * This helps keep the phone table readable while still preserving all
-   * seen variants separately in the expanded details row.
-   */
-  function chooseBestPhoneDisplay(currentDisplay, newDisplay) {
-    if (!currentDisplay) return newDisplay;
-    if (newDisplay.indexOf("+") === 0 && currentDisplay.indexOf("+") !== 0) return newDisplay;
-    if (newDisplay.length > currentDisplay.length) return newDisplay;
-    return currentDisplay;
+  if (normalized.charAt(0) === "+") {
+    normalized = "+" + normalized.slice(1).replace(/\D/g, "");
+  } else {
+    normalized = normalized.replace(/\D/g, "");
   }
 
-  /**
-   * Adds a validated phone result to the phone result map.
-   *
-   * Storage model:
-   * - key: normalized E.164-ish number from libphonenumber
-   * - display: best human-readable format
-   * - count: total occurrences
-   * - sources: pages it appeared on
-   * - variants: raw formats encountered on pages
-   *
-   * This gives strong deduplication without losing evidence.
-   */
-  function addPhoneResult(rawValue, url, parsed) {
-    var bucket = state.results.phone;
-    var key = parsed.number;
-    var display = parsed.formatInternational();
-    var entry;
-
-    if (!key) return;
-
-    if (bucket.has(key)) {
-      entry = bucket.get(key);
-      entry.count++;
-      entry.sources.add(url);
-      entry.variants.add(rawValue.trim());
-      entry.display = chooseBestPhoneDisplay(entry.display, display);
-      return;
-    }
-
-    bucket.set(key, {
-      count: 1,
-      sources: new Set([url]),
-      variants: new Set([rawValue.trim()]),
-      display: display,
-      expanded: false
-    });
+  if (normalized.replace(/\D/g, "").length < 7 || normalized.replace(/\D/g, "").length > 15) {
+    return null;
   }
 
-  /**
-   * Extracts phone candidates from text, filters noise, validates candidates
-   * with libphonenumber, and stores only valid phone numbers.
-   *
-   * This is the balanced implementation:
-   * - broad regex
-   * - light heuristic cleanup
-   * - real validation by libphonenumber
-   *
-   * It avoids the huge complexity of region scoring while still staying
-   * much cleaner than raw regex-only extraction.
-   */
-  function extractPhones(text, url) {
-    var lib = window.libphonenumber;
-    var matches;
-    var i;
-    var raw;
-    var parsed;
+  return normalized;
+}
 
-    if (!lib || !lib.parsePhoneNumberFromString) return;
+function addPossiblePhoneResult(rawValue, url) {
+  var bucket = state.results.phone;
+  var raw = (rawValue || "").trim();
+  var normalized = normalizeLoosePhone(raw);
+  var key = normalized || raw;
+  var entry;
 
-    matches = text.match(PHONE_CANDIDATE_RE);
-    if (!matches) return;
+  if (!raw || looksTooFakeAsPhone(raw)) return;
 
-    for (i = 0; i < matches.length; i++) {
-      raw = matches[i].trim();
+  if (bucket.has(key)) {
+    entry = bucket.get(key);
+    entry.count++;
+    entry.sources.add(url);
+    entry.variants.add(raw);
+    entry.display = chooseBestPhoneDisplay(entry.display, raw);
+    return;
+  }
 
-      if (looksLikeObviousNonPhone(raw)) {
-        continue;
-      }
+  bucket.set(key, {
+    count: 1,
+    sources: new Set([url]),
+    variants: new Set([raw]),
+    display: raw,
+    raw: raw,
+    normalized: normalized,
+    expanded: false
+  });
+}
 
-      try {
-        parsed = lib.parsePhoneNumberFromString(raw);
-        if (!parsed || !parsed.isValid()) {
-          continue;
-        }
-        addPhoneResult(raw, url, parsed);
-      } catch (err) {}
+function extractPhonesFromText(text, url) {
+  var matches;
+  var i;
+  var raw;
+
+  if (!text) return;
+
+  matches = text.match(PHONE_CANDIDATE_RE);
+  if (!matches || !matches.length) return;
+
+  for (i = 0; i < matches.length; i++) {
+    raw = matches[i].trim();
+    addPossiblePhoneResult(raw, url);
+  }
+}
+
+function extractPhonesFromTelLinks(doc, url) {
+  var links;
+  var i;
+  var href;
+  var raw;
+
+  if (!doc || !doc.querySelectorAll) return;
+
+  links = doc.querySelectorAll('a[href^="tel:"], a[href^="TEL:"]');
+
+  for (i = 0; i < links.length; i++) {
+    href = links[i].getAttribute("href") || "";
+    raw = href.replace(/^tel:/i, "").trim();
+
+    if (raw) {
+      addPossiblePhoneResult(raw, url);
     }
   }
+}
+
+function extractPhonesFromDoc(doc, url) {
+  var text = ((doc.body && doc.body.textContent) || "").replace(/\u00A0/g, " ");
+  extractPhonesFromText(text, url);
+  extractPhonesFromTelLinks(doc, url);
+}
 
   // ================= COLLECTOR =================
   /**
@@ -764,12 +735,15 @@ if (!document.getElementById("osint-panel")) {
    *
    * This is the single entry point for per-page data extraction.
    */
-  function extractMatches(text, url) {
+  function extractMatches(doc, url) {
+    var text = ((doc.body && doc.body.textContent) || "").replace(/\u00A0/g, " ");
+
     addMatches("email", text.match(PATTERNS.email), url);
     addMatches("external", text.match(PATTERNS.external), url);
     addMatches("social", text.match(PATTERNS.social), url);
-    extractPhones(text, url);
-  }
+
+    extractPhonesFromDoc(doc, url);
+}
 
   // ================= EXPANDABLE ROWS =================
   /**
@@ -854,10 +828,37 @@ if (!document.getElementById("osint-panel")) {
 
     wrapper.appendChild(listEl);
 
+    if (type === "phone") {
+      if (entry.normalized) {
+        var normalizedTitle = doc.createElement("div");
+        normalizedTitle.className = "variant-title";
+        normalizedTitle.textContent = "Normalized key";
+        wrapper.appendChild(normalizedTitle);
+
+        var normalizedList = doc.createElement("div");
+        normalizedList.className = "sources-list";
+
+        var normalizedItem = doc.createElement("div");
+        normalizedItem.className = "source-item";
+
+        var normalizedBullet = doc.createElement("span");
+        normalizedBullet.className = "source-bullet";
+        normalizedBullet.textContent = ">";
+        normalizedItem.appendChild(normalizedBullet);
+
+        var normalizedText = doc.createElement("span");
+        normalizedText.textContent = entry.normalized;
+        normalizedItem.appendChild(normalizedText);
+
+        normalizedList.appendChild(normalizedItem);
+        wrapper.appendChild(normalizedList);
+      }
+    }
+
     if (type === "phone" && entry.variants && entry.variants.size > 1) {
       variantsTitle = doc.createElement("div");
       variantsTitle.className = "variant-title";
-      variantsTitle.textContent = "Formats seen";
+      variantsTitle.textContent = "Raw data seen";
       wrapper.appendChild(variantsTitle);
 
       variantsList = doc.createElement("div");
@@ -1005,15 +1006,25 @@ if (!document.getElementById("osint-panel")) {
     renderAllTables();
   }
 
+  function isInternalUrl(urlString) {
+    var hostname;
+
+    try {
+      hostname = new URL(urlString).hostname.toLowerCase();
+    } catch (err) {
+      return false;
+    }
+
+    return hostname === state.baseDomain || hostname.endsWith("." + state.baseDomain);
+}
+
   // ================= DISCOVERY =================
   /**
    * Discovers all internal links up to the selected crawl depth.
    *
-   * Important design choice:
    * - discovery is done first
    * - scanning/extraction is done second
    *
-   * That keeps the UX clearer:
    * - "Pages Found" belongs to discovery
    * - "Scanned" belongs to extraction
    *
@@ -1030,6 +1041,9 @@ if (!document.getElementById("osint-panel")) {
       var tasks;
       var i;
       var next;
+
+      // Stop crawl if stop button is clicked
+      if (state.stopRequested) return;
 
       url = url.replace(/\/+$/, "").toLowerCase();
 
@@ -1053,9 +1067,10 @@ if (!document.getElementById("osint-panel")) {
             next.hash = "";
             next = next.href.replace(/\/+$/, "").toLowerCase();
 
-            if (next.indexOf(state.domain) !== -1 && !visited.has(next)) {
+            if (isInternalUrl(next) && !visited.has(next)) {
               tasks.push(crawl(next, depth + 1));
             }
+
           } catch (err) {}
         }
 
@@ -1096,7 +1111,7 @@ if (!document.getElementById("osint-panel")) {
       var text;
 
       while (true) {
-        if (index >= urls.length) break;
+        if (state.stopRequested || index >= urls.length) break;
         currentIndex = index;
         index++;
 
@@ -1105,8 +1120,8 @@ if (!document.getElementById("osint-panel")) {
         try {
           res = await fetch(url);
           html = await res.text();
-          text = html.replace(/\u00A0/g, " ");
-          extractMatches(text, url);
+          var docParsed = new DOMParser().parseFromString(html, "text/html");
+          extractMatches(docParsed, url);
         } catch (err) {}
 
         state.scanned++;
@@ -1145,6 +1160,7 @@ if (!document.getElementById("osint-panel")) {
     state.startTime = Date.now();
     state.lastStatsHTML = "";
     state.phoneLibPromise = null;
+    state.stopRequested = false;
     state.results = {
       email: new Map(),
       phone: new Map(),
@@ -1171,12 +1187,6 @@ if (!document.getElementById("osint-panel")) {
     resetState();
     openOutputWindow();
     refreshUI();
-
-    try {
-      await getPhoneLib();
-    } catch (err) {
-      console.warn("Phone library not available:", err);
-    }
 
     state.links = await discoverLinks();
 
