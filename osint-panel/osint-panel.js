@@ -85,7 +85,7 @@ if (!document.getElementById("osint-panel")) {
   var PATTERNS = {
     email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g,
     social: /https?:\/\/[^\s"'<>]*(facebook|instagram|linkedin|twitter|tiktok|youtube)[^\s"'<>]*/gi,
-    external: new RegExp("https?:\\/\\/(?!(?:[^\\/]+\\.)?" + state.baseDomain.replace(/\./g, "\\.") + "(?:[\\/:?#]|$))[^\\s\"'<>]+", "gi")
+    external: new RegExp("https?:\\/\\/(?!(?:[^\\/\\s\"'<>]+\\.)?" + state.baseDomain.replace(/\./g, "\\.") + "(?:[\\/\\s\"'<>?:#]|$))[^\\s\"'<>]+", "gi")
   };
 
   // Broad phone candidate matcher.
@@ -1117,11 +1117,17 @@ function extractPhonesFromDoc(doc, url) {
 
         url = urls[currentIndex];
 
+        // For the current page, check 'document',
+        // for the other pages we do the actual fetch. 
         try {
-          res = await fetch(url);
-          html = await res.text();
-          var docParsed = new DOMParser().parseFromString(html, "text/html");
-          extractMatches(docParsed, url);
+          if (url === state.startUrl) {
+            extractMatches(document, url);
+          } else {
+            res = await fetch(url);
+            html = await res.text();
+            var docParsed = new DOMParser().parseFromString(html, "text/html");
+            extractMatches(docParsed, url);
+          }
         } catch (err) {}
 
         state.scanned++;
