@@ -183,7 +183,7 @@ if (!document.getElementById("osint-panel")) {
       "position:fixed",
       "top:20px",
       "right:20px",
-      "z-index:99999",
+      "z-index:9999999",
       "width:340px",
       "max-height:calc(100vh - 40px)",
       "background:linear-gradient(180deg,rgba(14,18,24,0.96),rgba(8,11,16,0.96))",
